@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Consent Load-Order Scanner",
+  "version": "0.1.0",
+  "description": "Scans the current site for cookies and tags, detects the consent manager (TrustArc), and checks whether it loads before cookies/tags are placed.",
+  "permissions": [
+    "webRequest",
+    "webNavigation",
+    "cookies",
+    "scripting",
+    "storage",
+    "browsingData",
+    "tabs"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Consent Load-Order Scanner"
+  }
+}
