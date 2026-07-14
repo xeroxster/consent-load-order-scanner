@@ -49,10 +49,6 @@ a trailing `\\\*` in a cookie name matches as a prefix).
 * MV3 service workers can be suspended by Chrome, but the scan's event stream
 keeps it alive for the \~35 s window in practice.
 
-## Legal
-
-This software is provided as-is with no warranties. 
-
 ## Author
 
 Ryan Vinelli, 2026
