@@ -1,6 +1,6 @@
 # Consent Load-Order Scanner (Chrome extension)
 
-Interactive extension to review how a website loads cookies and tags in relation to a consent manager. Browse to any site, click **Scan this site**, and the extension reloads the page with a clean cookie jar while recording:
+Interactive extension to review how a website loads cookies and tags in relation to a consent manager. This is very useful to test if anything is loading prior to a required action for consent compliance. Browse to any site, click **Scan this site**, and the extension reloads the page with a clean cookie jar while recording:
 
 1. Every cookie placed (HTTP `Set-Cookie`, JS `document.cookie`, and cookies
 observed via `chrome.cookies.onChanged`), each with a timestamp
