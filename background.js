@@ -1,8 +1,9 @@
-// Consent Load-Order Scanner - service worker (v0.1.1)
+// Consent Load-Order Scanner - service worker (v0.2.0)
 // Orchestrates a scan: clears site state, instruments the tab, reloads it,
-// records requests + cookies with timestamps, detects the CMP, and computes
-// a load-order verdict. Results are stored in chrome.storage.session and
-// rendered by the popup.
+// records requests + cookies with timestamps, detects the CMP, computes a
+// load-order verdict, and attributes each tag/cookie to hardcoded HTML,
+// a tag manager, or another injecting script. Results are stored in
+// chrome.storage.session and rendered by the popup.
 
 // ---------------------------------------------------------------------------
 // CMP signatures. Order matters: specific CMPs first, the generic IAB TCF
@@ -79,7 +80,6 @@ const CMP_SIGNATURES = {
       'aggregator.service.usercentrics.eu',
       'uct.service.usercentrics.eu'
     ],
-    // v2 exposes UC_UI; v3 exposes __ucCmp. Consent lives in localStorage.
     js_globals: ['UC_UI', '__ucCmp'],
     dom_selectors: ['#usercentrics-root', '#usercentrics-cmp-ui'],
     own_cookies: ['uc_settings']
@@ -128,13 +128,13 @@ const CMP_SIGNATURES = {
     own_cookies: []
   },
   'Complianz (WordPress)': {
-    url_markers: ['complianz-gdpr'], // first-party plugin path
+    url_markers: ['complianz-gdpr'],
     js_globals: ['complianz', 'cmplz_banner'],
     dom_selectors: ['#cmplz-cookiebanner-container', '.cmplz-cookiebanner'],
     own_cookies: ['cmplz_*']
   },
   'Borlabs (WordPress)': {
-    url_markers: ['borlabs-cookie'], // first-party plugin path
+    url_markers: ['borlabs-cookie'],
     js_globals: ['BorlabsCookie'],
     dom_selectors: ['#BorlabsCookieBox', '#BorlabsCookieWidget'],
     own_cookies: ['borlabs-cookie']
@@ -145,15 +145,24 @@ const CMP_SIGNATURES = {
     dom_selectors: ['#klaro', '.klaro .cookie-notice'],
     own_cookies: ['klaro']
   },
-  // Keep LAST: generic fallback when a TCF-compliant CMP is present but not
-  // specifically identified. euconsent-v2 etc. are the IAB consent-string
-  // cookies any TCF CMP may set - never violations themselves.
   'IAB TCF CMP (unidentified)': {
     url_markers: ['.mgr.consensu.org'],
     js_globals: ['__tcfapi', '__gpp'],
     dom_selectors: [],
     own_cookies: ['euconsent-v2', 'eupubconsent-v2', 'usprivacy', 'us_privacy']
   }
+};
+
+// ---------------------------------------------------------------------------
+// Tag manager signatures (substring match on the LOADING script's URL)
+// ---------------------------------------------------------------------------
+const TAG_MANAGERS = {
+  'Google Tag Manager': ['googletagmanager.com/gtm.js'],
+  'Google tag (gtag.js)': ['googletagmanager.com/gtag/js'],
+  'Adobe Launch/DTM': ['adobedtm.com'],
+  'Tealium iQ': ['tiqcdn.com', 'utag.js'],
+  'Segment': ['cdn.segment.com', 'cdn.segment.io'],
+  'Ensighten': ['nexus.ensighten.com']
 };
 
 const TRACKER_DOMAINS = {
@@ -262,9 +271,63 @@ function cmpOwnCookie(name) {
   return null;
 }
 
+function matchTagManager(url) {
+  for (const [name, markers] of Object.entries(TAG_MANAGERS)) {
+    if (markers.some((m) => (url || '').includes(m))) return name;
+  }
+  return null;
+}
+
+function stripLineCol(url) {
+  return (url || '').replace(/:\d+:\d+$/, '');
+}
+
+function firstUrlInStack(stackStr) {
+  const m = /https?:\/\/[^\s\)\|]+/.exec(stackStr || '');
+  return m ? stripLineCol(m[0]) : null;
+}
+
+function noHash(url) {
+  return (url || '').split('#')[0];
+}
+
 async function setState(patch) {
   const { scan } = await chrome.storage.session.get('scan');
   await chrome.storage.session.set({ scan: { ...(scan || {}), ...patch } });
+}
+
+// ---------------------------------------------------------------------------
+// Origin attribution (hardcoded vs tag-managed vs injected).
+// injectMap: script URL -> injector call stack (from the page hook). A script
+// request NOT in the map was loaded by a <script> tag in the HTML (hardcoded).
+// ---------------------------------------------------------------------------
+function resolveScriptOrigin(url, injectMap, pageUrl, depth = 0) {
+  if (depth > 8) return 'Unknown';
+  const stack = injectMap.get(noHash(url));
+  if (stack === undefined) return 'Hardcoded (HTML)';
+  const setter = firstUrlInStack(stack);
+  if (!setter) return 'Injected (unknown source)';
+  if (noHash(setter) === noHash(pageUrl)) return 'Hardcoded (inline script)';
+  const tm = matchTagManager(setter);
+  if (tm) return `Via ${tm}`;
+  if (noHash(setter) === noHash(url)) return 'Unknown';
+  const parent = resolveScriptOrigin(setter, injectMap, pageUrl, depth + 1);
+  if (parent.startsWith('Via ')) return parent;
+  return `Injected by ${hostOf(setter) || '?'}`;
+}
+
+function cookieOrigin(stackStr, injectMap, pageUrl) {
+  const setter = firstUrlInStack(stackStr);
+  if (!setter) return 'Unknown';
+  if (noHash(setter) === noHash(pageUrl)) return 'Hardcoded (inline script)';
+  const tm = matchTagManager(setter);
+  if (tm) return `Via ${tm}`;
+  const label = resolveScriptOrigin(setter, injectMap, pageUrl);
+  const host = hostOf(setter) || '?';
+  if (label.startsWith('Via ')) return `${label} (${host})`;
+  if (label.startsWith('Hardcoded')) return `Script on page (${host})`;
+  if (label.startsWith('Injected')) return `${label} -> ${host}`;
+  return `Script (${host})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,10 +360,10 @@ async function startScan(tabId) {
     tabId,
     url,
     siteDomain,
-    t0: null,               // epoch ms of navigation start
+    t0: null,
     requests: [],
-    cookieEvents: [],       // from chrome.cookies.onChanged
-    httpCookies: new Map(), // name -> {t, domain} from Set-Cookie headers
+    cookieEvents: [],
+    httpCookies: new Map(), // name -> {t, domain, viaUrl}
     cmp: { detected: null, firstRequestMs: null, loadedMs: null, apiPresent: false, bannerVisible: false },
     finalized: false,
     listeners: {}
@@ -325,7 +388,7 @@ async function startScan(tabId) {
     }
   } catch (e) { /* non-fatal */ }
 
-  // 2. Install the document.cookie hook for the reload.
+  // 2. Install the page hook (cookie writes + script injections) for the reload.
   try { await chrome.scripting.unregisterContentScripts({ ids: ['cookie-hook'] }); } catch (e) { /* not registered */ }
   await chrome.scripting.registerContentScripts([{
     id: 'cookie-hook',
@@ -386,7 +449,7 @@ function installListeners() {
       if (h.name.toLowerCase() === 'set-cookie' && h.value) {
         const name = h.value.split('=')[0].trim();
         if (name && !active.httpCookies.has(name)) {
-          active.httpCookies.set(name, { t, domain: hostOf(d.url) });
+          active.httpCookies.set(name, { t, domain: hostOf(d.url), viaUrl: d.url });
         }
       }
     }
@@ -407,7 +470,6 @@ function installListeners() {
 
   L.onCompleted = (d) => {
     if (d.tabId === active.tabId && d.frameId === 0) {
-      // Let late tags fire, then wrap up.
       setTimeout(() => finalize('completed'), 4000);
     }
   };
@@ -416,8 +478,9 @@ function installListeners() {
 
 // Runs inside the page (MAIN world) at the end of the scan.
 function collectPageData(sigs) {
-  const out = { jsCookieLog: [], apiPresent: false, bannerVisible: false, detected: null };
+  const out = { jsCookieLog: [], scriptInjectLog: [], apiPresent: false, bannerVisible: false, detected: null };
   try { out.jsCookieLog = (window.__jsCookieLog || []).slice(0, 500); } catch (e) {}
+  try { out.scriptInjectLog = (window.__scriptInjectLog || []).slice(0, 1000); } catch (e) {}
   for (const [name, sig] of Object.entries(sigs)) {
     for (const g of sig.js_globals) {
       try {
@@ -446,8 +509,8 @@ async function finalize(reason) {
   active.finalized = true;
   clearTimeout(active.hardTimeout);
 
-  // Page-side data: JS cookie log + CMP globals/banner.
-  let pageData = { jsCookieLog: [], apiPresent: false, bannerVisible: false, detected: null };
+  // Page-side data: JS cookie log, script injections, CMP globals/banner.
+  let pageData = { jsCookieLog: [], scriptInjectLog: [], apiPresent: false, bannerVisible: false, detected: null };
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId: active.tabId },
@@ -462,6 +525,19 @@ async function finalize(reason) {
   active.cmp.bannerVisible = pageData.bannerVisible;
   active.cmp.detected = active.cmp.detected || pageData.detected;
 
+  // Injection map for origin attribution (earliest injector per script URL).
+  const injectMap = new Map();
+  for (const e of pageData.scriptInjectLog || []) {
+    const key = noHash(e.src);
+    if (key && !injectMap.has(key)) injectMap.set(key, e.stack || '');
+  }
+
+  // Attribute origins to script requests (pixels/XHR can't be attributed
+  // without the debugger API, so they get '—').
+  for (const q of active.requests) {
+    q.origin = q.type === 'script' ? resolveScriptOrigin(q.url, injectMap, active.url) : '—';
+  }
+
   // Merge cookie observations, keeping the earliest sighting per name.
   const timed = new Map();
   const consider = (name, ev) => {
@@ -470,15 +546,23 @@ async function finalize(reason) {
     if (!cur || ev.t < cur.t) timed.set(name, ev);
   };
   for (const [name, info] of active.httpCookies) {
-    consider(name, { t: info.t, domain: info.domain, source: 'http' });
+    consider(name, {
+      t: info.t, domain: info.domain, source: 'http',
+      origin: resolveScriptOrigin(info.viaUrl, injectMap, active.url) === 'Hardcoded (HTML)'
+        ? 'HTTP response (see request origin)'
+        : resolveScriptOrigin(info.viaUrl, injectMap, active.url)
+    });
   }
   for (const e of pageData.jsCookieLog) {
     const name = String(e.cookie || '').split('=')[0].trim();
-    consider(name, { t: Math.round(e.t * 10) / 10, domain: hostOf(active.url), source: 'js' });
+    consider(name, {
+      t: Math.round(e.t * 10) / 10, domain: hostOf(active.url), source: 'js',
+      origin: cookieOrigin(e.stack || '', injectMap, active.url)
+    });
   }
   for (const e of active.cookieEvents) {
     const cur = timed.get(e.name);
-    if (!cur) timed.set(e.name, { t: e.t, domain: e.domain, source: 'observed' });
+    if (!cur) timed.set(e.name, { t: e.t, domain: e.domain, source: 'observed', origin: 'Unknown' });
   }
 
   // Final jar for the site domain (what actually persisted).
@@ -499,6 +583,7 @@ async function finalize(reason) {
       name,
       domain,
       source: ev ? ev.source : 'unknown',
+      origin: ev ? (ev.origin || 'Unknown') : 'Unknown',
       thirdParty: domain ? registrableDomain(domain) !== active.siteDomain : null,
       cmpCookie: cmpOwnCookie(name),
       inFinalJar: jarNames.has(name)
@@ -512,6 +597,14 @@ async function finalize(reason) {
   const preCmpTrackers = active.requests.filter((q) => q.tracker && !q.cmp && cmpT !== null && q.t < cmpT);
   const totalTrackers = active.requests.filter((q) => q.tracker && !q.cmp).length;
   const totalCookies = cookies.filter((c) => !c.cmpCookie).length;
+
+  // Origin breakdown for tracker script requests
+  const originCounts = {};
+  for (const q of active.requests) {
+    if (q.tracker && !q.cmp && q.origin && q.origin !== '—') {
+      originCounts[q.origin] = (originCounts[q.origin] || 0) + 1;
+    }
+  }
 
   let verdict, verdictClass;
   if (!active.cmp.detected) {
@@ -537,7 +630,8 @@ async function finalize(reason) {
       totalTrackers,
       preCmpCookies: preCmpCookies.map((c) => c.name),
       preCmpTrackers: [...new Set(preCmpTrackers.map((q) => q.host))],
-      totalRequests: active.requests.length
+      totalRequests: active.requests.length,
+      originCounts
     }
   };
 

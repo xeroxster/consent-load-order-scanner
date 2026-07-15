@@ -18,6 +18,7 @@
     position: sticky; top: 0; z-index: 2;
   }
   header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  #meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
   button {
     font: inherit; padding: 6px 14px; border-radius: 6px; cursor: pointer;
     border: 1px solid #1a5fb4; background: #1a5fb4; color: #fff; font-weight: 600;
@@ -36,10 +37,17 @@
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin-bottom: 12px; }
   .kv div:nth-child(odd) { color: var(--muted); }
   h2 { font-size: 12.5px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: 0.04em; color: #444; }
-  table { width: 100%; border-collapse: collapse; background: #fff; }
-  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
-  th { font-weight: 600; background: #f0f2f5; position: sticky; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  /* Fixed layout + ellipsis: columns get percentage widths (adapts to any
+     popup width/resolution), long values clip with "..." and show the full
+     text in a hover tooltip. Exports always contain the untruncated values. */
+  table { width: 100%; border-collapse: collapse; background: #fff; table-layout: fixed; }
+  th, td {
+    text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border);
+    vertical-align: top; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  th { font-weight: 600; background: #f0f2f5; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.wrap { white-space: normal; word-break: break-word; }
   tr.pre td { background: #ffebee; }
   tr.cmp td { background: #e3f2fd; }
   .tag { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 11px; background: #eee; }
@@ -53,7 +61,10 @@
 </head>
 <body>
   <header>
-    <h1>Consent Load-Order Scanner</h1>
+    <div>
+      <h1>Consent Load-Order Scanner</h1>
+      <div id="meta"></div>
+    </div>
     <button id="scanBtn">Scan this site</button>
   </header>
   <main id="content">
