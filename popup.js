@@ -5,7 +5,7 @@ const content = document.getElementById('content');
 const scanBtn = document.getElementById('scanBtn');
 
 // Version (from manifest.json) and last-updated date shown in the header.
-const UPDATED = '2026-07-15';
+const UPDATED = '2026-07-22'; // v0.3.3
 try {
   document.getElementById('meta').textContent =
     `v${chrome.runtime.getManifest().version} · updated ${UPDATED}`;
@@ -43,6 +43,7 @@ scanBtn.addEventListener('click', async () => {
 
 chrome.storage.session.onChanged.addListener((changes) => {
   if (changes.scan) render(changes.scan.newValue);
+  if (changes.withdrawal) renderWD(changes.withdrawal.newValue);
 });
 
 function render(scan) {
@@ -146,6 +147,7 @@ function render(scan) {
     <div class="exports">
       <button class="secondary" id="exportJson">Download JSON</button>
       <button class="secondary" id="exportCsv">Download CSV</button>
+      <button class="secondary" id="showWdBtn">Test consent withdrawal →</button>
     </div>
     <div class="note">Long names are truncated with "…" — hover any cell to see the full value;
     exports always contain untruncated data. Red rows fired before the consent manager was requested.
@@ -171,6 +173,13 @@ function render(scan) {
     }
     download(`consent_scan_${scan.siteDomain}.csv`, lines.join('\n'), 'text/csv');
   });
+
+  document.getElementById('showWdBtn').addEventListener('click', () => {
+    const panel = document.getElementById('wdPanel');
+    panel.classList.remove('collapsed');
+    document.getElementById('wdToggle').textContent = '▾ Consent withdrawal test';
+    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
 }
 
 function download(filename, text, mime) {
@@ -181,4 +190,142 @@ function download(filename, text, mime) {
   URL.revokeObjectURL(a.href);
 }
 
+// ---------------------------------------------------------------------------
+// Consent withdrawal test panel
+// ---------------------------------------------------------------------------
+const wdToggle = document.getElementById('wdToggle');
+const wdPanel = document.getElementById('wdPanel');
+const wdStartBtn = document.getElementById('wdStartBtn');
+const wdActionBtn = document.getElementById('wdActionBtn'); // dynamic: "Mark withdrawal" while monitoring, "Reset" otherwise
+const wdStatusLine = document.getElementById('wdStatusLine');
+const wdResults = document.getElementById('wdResults');
+
+wdToggle.addEventListener('click', () => {
+  const collapsed = wdPanel.classList.toggle('collapsed');
+  wdToggle.textContent = (collapsed ? '▸' : '▾') + ' Consent withdrawal test';
+});
+
+async function getWD() {
+  const { withdrawal } = await chrome.storage.session.get('withdrawal');
+  return withdrawal || { status: 'idle' };
+}
+
+wdStartBtn.addEventListener('click', async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab) return;
+  wdStartBtn.disabled = true;
+  const resp = await chrome.runtime.sendMessage({ type: 'WD_START', tabId: tab.id }).catch((e) => ({ ok: false, error: String(e) }));
+  if (resp && !resp.ok) {
+    wdStatusLine.innerHTML = `<span style="color:var(--bad)">Could not start: ${esc(resp.error)}</span>`;
+    wdStartBtn.disabled = false;
+  }
+});
+
+// Single button whose action follows the test's state: it marks withdrawal
+// while a test is actively monitoring, and resets at every other point
+// (idle, countdown, done, error) so there's always something to click.
+wdActionBtn.addEventListener('click', async () => {
+  if (wdActionBtn.classList.contains('mark')) {
+    wdActionBtn.disabled = true;
+    const resp = await chrome.runtime.sendMessage({ type: 'WD_MARK' }).catch((e) => ({ ok: false, error: String(e) }));
+    if (resp && !resp.ok) {
+      wdStatusLine.innerHTML = `<span style="color:var(--bad)">Could not mark withdrawal: ${esc(resp.error)}. Click Reset and try again.</span>`;
+      // Fall back to Reset immediately so a broken/expired test can't get stuck.
+      wdActionBtn.classList.remove('mark');
+      wdActionBtn.classList.add('reset');
+      wdActionBtn.textContent = 'Reset';
+      wdActionBtn.disabled = false;
+    }
+  } else {
+    await chrome.runtime.sendMessage({ type: 'WD_RESET' }).catch(() => {});
+  }
+});
+
+function setWDButtons(state) {
+  // state: 'idle' | 'monitoring' | 'withdrawn' | 'done' | 'error'
+  wdStartBtn.disabled = state === 'monitoring' || state === 'withdrawn';
+  if (state === 'idle') {
+    wdActionBtn.hidden = true;
+  } else if (state === 'monitoring') {
+    wdActionBtn.hidden = false;
+    wdActionBtn.disabled = false;
+    wdActionBtn.classList.remove('reset');
+    wdActionBtn.classList.add('mark');
+    wdActionBtn.textContent = 'Mark withdrawal';
+  } else {
+    // withdrawn (mid-countdown, can abort), done, error - all resettable
+    wdActionBtn.hidden = false;
+    wdActionBtn.disabled = false;
+    wdActionBtn.classList.remove('mark');
+    wdActionBtn.classList.add('reset');
+    wdActionBtn.textContent = 'Reset';
+  }
+}
+
+function renderWD(wd) {
+  if (!wd || wd.status === 'idle') {
+    wdStatusLine.textContent = '';
+    wdResults.innerHTML = '';
+    setWDButtons('idle');
+    return;
+  }
+
+  if (wd.status === 'monitoring') {
+    setWDButtons('monitoring');
+    wdStatusLine.innerHTML = `<span class="spinner">&#9696;</span> Monitoring ${esc(wd.url || '')} — grant consent, browse, then withdraw it on the page, then click <b>Mark withdrawal</b>.`;
+    wdResults.innerHTML = '';
+    return;
+  }
+
+  if (wd.status === 'withdrawn') {
+    setWDButtons('withdrawn');
+    wdStatusLine.innerHTML = `<span class="spinner">&#9696;</span> Withdrawal marked — checking for ~15s to see if any tracker still fires… (click Reset to abort early)`;
+    wdResults.innerHTML = '';
+    return;
+  }
+
+  if (wd.status === 'error') {
+    setWDButtons('error');
+    wdStatusLine.innerHTML = `<span style="color:var(--bad)">Test failed: ${esc(wd.error)}</span>`;
+    wdResults.innerHTML = '';
+    return;
+  }
+
+  if (wd.status === 'done') {
+    const r = wd.result;
+    setWDButtons('done');
+    wdStatusLine.textContent = '';
+    if (!r) { wdResults.innerHTML = ''; return; }
+
+    const reqRows = r.requestsAfterMark.slice(0, 100).map((q) => `<tr class="pre">
+        <td class="num">${fmtMs(q.t)}</td>
+        ${cell(q.host)}
+        ${cell(q.tracker || '')}
+        ${cell(q.type)}
+      </tr>`).join('');
+
+    const cmpLine = r.cmpConsentChanged === null
+      ? 'No CMP consent cookie detected to check'
+      : r.cmpConsentChanged
+        ? 'CMP consent cookie value changed after withdrawal (it registered the action)'
+        : '<span style="color:var(--bad)">CMP consent cookie value did NOT change after withdrawal</span>';
+
+    wdResults.innerHTML = `
+      <div class="verdict ${r.verdictClass}" style="margin-top:8px;">${esc(r.verdict)}</div>
+      <div class="kv">
+        <div>Consent cookie check</div><div>${cmpLine}</div>
+        <div>Cookies still present*</div><div>${r.stillPresentCookies.length ? esc(r.stillPresentCookies.join(', ')) : 'none'}</div>
+      </div>
+      ${reqRows ? `<h2>Tracker requests after withdrawal</h2>
+        <table><colgroup><col style="width:12%"><col style="width:34%"><col style="width:32%"><col style="width:22%"></colgroup>
+        <tr><th>+ms after mark</th><th>Host</th><th>Tracker</th><th>Type</th></tr>
+        ${reqRows}</table>` : ''}
+      <div class="note">*Cookies still present were set before withdrawal and remain in the jar
+      afterward — a weaker signal than a live request, since an inert leftover cookie isn't
+      necessarily still being used. The tracker-request table above is the stronger evidence of
+      continued processing after consent was withdrawn.</div>`;
+  }
+}
+
 getScan().then(render);
+getWD().then(renderWD);

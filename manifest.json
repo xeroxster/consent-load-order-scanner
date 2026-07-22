@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Consent Load-Order Scanner",
-  "version": "0.2.0",
-  "description": "Scans the current site for cookies and tags, detects the consent manager, checks whether it loads before cookies/tags are placed, and attributes each tag/cookie to hardcoded HTML or a tag manager.",
+  "version": "0.3.3",
+  "description": "Scans the current site for cookies and tags, detects the consent manager, checks whether it loads before cookies/tags are placed, attributes each tag/cookie to hardcoded HTML or a tag manager, and tests whether tracking actually stops after consent is withdrawn.",
   "permissions": [
     "webRequest",
     "webNavigation",

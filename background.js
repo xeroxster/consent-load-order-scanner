@@ -346,6 +346,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       });
     return true; // async response
   }
+  if (msg.type === 'WD_START') {
+    startWithdrawalTest(msg.tabId)
+      .then(() => sendResponse({ ok: true }))
+      .catch(async (e) => {
+        await setWDState({ status: 'error', error: String(e.message || e) });
+        cleanupWD();
+        sendResponse({ ok: false, error: String(e.message || e) });
+      });
+    return true;
+  }
+  if (msg.type === 'WD_MARK') {
+    markWithdrawal()
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e.message || e) }));
+    return true;
+  }
+  if (msg.type === 'WD_RESET') {
+    cleanupWD();
+    chrome.storage.session.set({ withdrawal: { status: 'idle' } }).then(() => sendResponse({ ok: true }));
+    return true;
+  }
 });
 
 async function startScan(tabId) {
@@ -654,4 +675,206 @@ function cleanup() {
   try { if (L.onCookieChanged) chrome.cookies.onChanged.removeListener(L.onCookieChanged); } catch (e) {}
   chrome.scripting.unregisterContentScripts({ ids: ['cookie-hook'] }).catch(() => {});
   active = null;
+}
+
+// ---------------------------------------------------------------------------
+// Consent withdrawal test
+//
+// Unlike the load-order scan, this does NOT reload the tab: reloading would
+// wipe the very consent state we're trying to test. Instead it monitors the
+// live tab continuously while you interact with the page normally:
+//   1. WD_START  - snapshot the site's current cookies, start recording every
+//                  request and cookie change from this moment on.
+//   2. You use the site's own UI to grant consent, browse a bit, then use the
+//      site's own "reject" / "withdraw" / "do not sell" control.
+//   3. WD_MARK   - click "Mark withdrawal" the instant after you've withdrawn
+//                  consent. This timestamps the boundary and schedules the
+//                  verdict WD_MONITOR_MS later.
+// The verdict is based on what happens AFTER the mark: any tracker request
+// that still fires is live evidence that processing continued past
+// withdrawal (the actual compliance-relevant behavior); cookies that persist
+// unexpired are reported separately since a stale inert cookie is a weaker
+// signal than a live outbound request.
+// ---------------------------------------------------------------------------
+const WD_MONITOR_MS = 15000;
+
+let activeWD = null;
+
+async function setWDState(patch) {
+  const { withdrawal } = await chrome.storage.session.get('withdrawal');
+  await chrome.storage.session.set({ withdrawal: { ...(withdrawal || {}), ...patch } });
+}
+
+async function snapshotCookies(domain) {
+  const map = new Map();
+  try {
+    const cookies = await chrome.cookies.getAll({ domain });
+    for (const c of cookies) map.set(c.name, { value: c.value, domain: c.domain, expirationDate: c.expirationDate || null });
+  } catch (e) { /* non-fatal */ }
+  return map;
+}
+
+function snapshotCmpCookies(cookieMap) {
+  const out = {};
+  for (const [name, info] of cookieMap) {
+    const cmp = cmpOwnCookie(name);
+    if (cmp) out[name] = { cmp, value: info.value };
+  }
+  return out;
+}
+
+async function startWithdrawalTest(tabId) {
+  if (active) throw new Error('A load-order scan is currently running - let it finish first');
+  if (activeWD) throw new Error('A withdrawal test is already running');
+  const tab = await chrome.tabs.get(tabId);
+  if (!/^https?:/.test(tab.url || '')) throw new Error('Only http(s) pages can be tested');
+
+  const url = tab.url;
+  const siteDomain = registrableDomain(new URL(url).hostname);
+  const baseline = await snapshotCookies(siteDomain);
+
+  activeWD = {
+    tabId,
+    url,
+    siteDomain,
+    t0: Date.now(),
+    requests: [],
+    cookieEvents: [],
+    baselineNames: new Set(baseline.keys()),
+    cmpSnapshotStart: snapshotCmpCookies(baseline),
+    markedAtMs: null,
+    finalized: false,
+    listeners: {}
+  };
+
+  await setWDState({
+    status: 'monitoring',
+    url,
+    siteDomain,
+    startedAt: Date.now(),
+    markedAt: null,
+    result: null,
+    error: null
+  });
+
+  installWDListeners();
+}
+
+function relWD(epochMs) {
+  if (!activeWD) return 0;
+  return Math.max(0, Math.round((epochMs - activeWD.t0) * 10) / 10);
+}
+
+function installWDListeners() {
+  const filter = { urls: ['<all_urls>'], tabId: activeWD.tabId };
+  const L = activeWD.listeners;
+
+  L.onRequest = (d) => {
+    const t = relWD(d.timeStamp);
+    const host = hostOf(d.url);
+    if (activeWD.requests.length < 4000) {
+      activeWD.requests.push({
+        t,
+        host,
+        type: d.type,
+        thirdParty: registrableDomain(host) !== activeWD.siteDomain,
+        tracker: classifyTracker(host),
+        cmp: matchCmpUrl(d.url)
+      });
+    }
+  };
+  chrome.webRequest.onBeforeRequest.addListener(L.onRequest, filter);
+
+  L.onCookieChanged = (info) => {
+    activeWD.cookieEvents.push({
+      t: relWD(Date.now()),
+      name: info.cookie.name,
+      domain: (info.cookie.domain || '').replace(/^\./, ''),
+      removed: !!info.removed
+    });
+  };
+  chrome.cookies.onChanged.addListener(L.onCookieChanged);
+}
+
+async function markWithdrawal() {
+  if (!activeWD) throw new Error('Start a withdrawal test first');
+  if (activeWD.markedAtMs !== null) throw new Error('Withdrawal already marked for this test');
+
+  activeWD.markedAtMs = relWD(Date.now());
+  const snap = await snapshotCookies(activeWD.siteDomain);
+  activeWD.cmpSnapshotAtMark = snapshotCmpCookies(snap);
+
+  await setWDState({ status: 'withdrawn', markedAt: Date.now() });
+  activeWD.timeout = setTimeout(() => finalizeWithdrawal().catch(() => {}), WD_MONITOR_MS);
+}
+
+async function finalizeWithdrawal() {
+  if (!activeWD || activeWD.finalized) return;
+  activeWD.finalized = true;
+  clearTimeout(activeWD.timeout);
+
+  const finalSnap = await snapshotCookies(activeWD.siteDomain);
+  const cmpSnapshotEnd = snapshotCmpCookies(finalSnap);
+
+  const markT = activeWD.markedAtMs;
+  const requestsAfterMark = activeWD.requests.filter((q) => q.tracker && !q.cmp && q.t >= markT);
+  const trackerHostsAfter = [...new Set(requestsAfterMark.map((q) => q.host))];
+
+  // Non-CMP cookies known before the mark (baseline or set/changed before it)
+  // that are still present, unexpired, in the final snapshot.
+  const knownBeforeMark = new Set(activeWD.baselineNames);
+  for (const e of activeWD.cookieEvents) {
+    if (!e.removed && e.t < markT) knownBeforeMark.add(e.name);
+  }
+  const stillPresent = [];
+  for (const name of knownBeforeMark) {
+    if (cmpOwnCookie(name)) continue;
+    if (finalSnap.has(name)) stillPresent.push(name);
+  }
+
+  // Did the CMP's own consent-state cookie(s) actually change value once
+  // withdrawal was marked? A sanity check that the CMP registered the action.
+  let cmpConsentChanged = null;
+  const beforeMap = activeWD.cmpSnapshotAtMark || activeWD.cmpSnapshotStart;
+  const afterNames = new Set([...Object.keys(beforeMap), ...Object.keys(cmpSnapshotEnd)]);
+  if (afterNames.size > 0) {
+    cmpConsentChanged = false;
+    for (const name of afterNames) {
+      const before = beforeMap[name]?.value;
+      const after = cmpSnapshotEnd[name]?.value;
+      if (before !== after) { cmpConsentChanged = true; break; }
+    }
+  }
+
+  let verdict, verdictClass;
+  if (requestsAfterMark.length === 0) {
+    verdict = 'PASS — no tracker requests observed after withdrawal was marked';
+    verdictClass = 'good';
+  } else {
+    verdict = `REVIEW — ${requestsAfterMark.length} tracker request(s) fired after withdrawal (${trackerHostsAfter.slice(0, 5).join(', ')}${trackerHostsAfter.length > 5 ? ', …' : ''})`;
+    verdictClass = 'bad';
+  }
+
+  const result = {
+    verdict,
+    verdictClass,
+    monitorMs: WD_MONITOR_MS,
+    markedAtMs: markT,
+    requestsAfterMark,
+    trackerHostsAfter,
+    stillPresentCookies: stillPresent.sort(),
+    cmpConsentChanged
+  };
+
+  await setWDState({ status: 'done', finishedAt: Date.now(), result });
+  cleanupWD();
+}
+
+function cleanupWD() {
+  if (!activeWD) return;
+  clearTimeout(activeWD.timeout);
+  const L = activeWD.listeners || {};
+  try { if (L.onRequest) chrome.webRequest.onBeforeRequest.removeListener(L.onRequest); } catch (e) {}
+  try { if (L.onCookieChanged) chrome.cookies.onChanged.removeListener(L.onCookieChanged); } catch (e) {}
+  activeWD = null;
 }

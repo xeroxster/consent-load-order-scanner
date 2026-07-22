@@ -57,6 +57,25 @@
   #status { color: var(--muted); }
   .spinner { display: inline-block; animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Consent withdrawal test panel */
+  #wdSection { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 10px; }
+  #wdToggle {
+    background: none; border: none; color: #1a5fb4; font-weight: 600; padding: 0;
+    cursor: pointer; font-size: 12.5px; display: flex; align-items: center; gap: 4px;
+  }
+  #wdPanel { margin-top: 8px; }
+  #wdPanel.collapsed { display: none; }
+  .wd-steps { color: var(--muted); font-size: 11.5px; line-height: 1.5; margin-bottom: 8px; }
+  .wd-buttons { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  .wd-buttons button { padding: 5px 10px; font-size: 12px; }
+  /* wdActionBtn is dynamic: "Mark withdrawal" (amber) while monitoring,
+     "Reset" (grey) at every other point so there's always something
+     clickable to move the test forward or start over. */
+  #wdActionBtn.mark { background: var(--warn); border-color: var(--warn); color: #fff; }
+  #wdActionBtn.reset { background: #fff; color: var(--muted); border-color: var(--border); }
+  #wdActionBtn[hidden] { display: none; }
+  #wdStatusLine { font-size: 12px; margin-bottom: 6px; }
 </style>
 </head>
 <body>
@@ -67,9 +86,39 @@
     </div>
     <button id="scanBtn">Scan this site</button>
   </header>
-  <main id="content">
-    <div class="empty">Open the site you want to check, then click <b>Scan this site</b>.
-      The page reloads with cookies cleared so the scan reflects a first visit with no consent given.</div>
+  <main>
+    <div id="content">
+      <div class="empty">Open the site you want to check, then click <b>Scan this site</b>.
+        The page reloads with cookies cleared so the scan reflects a first visit with no consent given.</div>
+    </div>
+
+    <!-- Lives OUTSIDE #content on purpose: #content gets fully overwritten on
+         every scan render, which would wipe this panel (and its listeners)
+         out from under the user. Keeping it a sibling means it survives every
+         scan, so "Test consent withdrawal" always has something to reveal. -->
+    <div id="wdSection">
+      <button id="wdToggle">▸ Consent withdrawal test</button>
+      <div id="wdPanel" class="collapsed">
+        <div class="wd-steps">
+          Tests whether tracking actually stops once consent is withdrawn (no reload —
+          your accepted consent state is preserved throughout):
+          <ol style="margin:4px 0 0 18px; padding:0;">
+            <li>Click <b>Start test</b>, then accept consent and browse the page normally.</li>
+            <li>Use the site's own controls to withdraw consent (reject all / disable
+              categories / do not sell).</li>
+            <li>Click <b>Mark withdrawal</b> immediately after. Results appear ~15s later.</li>
+          </ol>
+          The action button doubles as <b>Reset</b> whenever there's nothing to mark yet —
+          click it anytime to clear the test and start over.
+        </div>
+        <div id="wdStatusLine"></div>
+        <div class="wd-buttons">
+          <button id="wdStartBtn">Start test</button>
+          <button id="wdActionBtn" class="mark" hidden>Mark withdrawal</button>
+        </div>
+        <div id="wdResults"></div>
+      </div>
+    </div>
   </main>
   <script src="popup.js"></script>
 </body>

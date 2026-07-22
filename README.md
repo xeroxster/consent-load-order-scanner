@@ -12,6 +12,8 @@ present and its banner visible
 5. The **origin** of each tag and cookie: hardcoded in the page HTML, delivered
 through a tag manager (Google Tag Manager, gtag.js, Adobe Launch/DTM, Tealium iQ,
 Segment, Ensighten), or injected at runtime by another script (piggybacking)
+6. A **consent withdrawal test**: whether tracking actually stops once you
+withdraw consent through the site's own controls (see below)
 
 ## Install (load unpacked — no store needed)
 
@@ -47,6 +49,35 @@ script: piggybacking, worth reviewing in audits
 XHR beacons, and HTTP-response cookies can't always be attributed; scripts and
 JS-set cookies can
 
+## Consent withdrawal test
+
+A separate, collapsible panel ("Consent withdrawal test") tests the other half of
+consent compliance: does tracking actually stop once a user withdraws consent?
+This does **not** reload the page — reloading would wipe the consent state being
+tested — so it works alongside your normal browsing:
+
+1. **Start test** — snapshots the site's current cookies and starts recording every
+network request and cookie change from that moment.
+2. Interact with the page as a real visitor would: accept the consent banner,
+browse around so trackers/cookies get set.
+3. Use the site's **own** controls to withdraw consent — reject all, disable
+categories, "Do Not Sell," reopen preferences and opt out, whatever it offers.
+4. **Mark withdrawal** the instant after you've done that. The extension then
+watches for 15 more seconds and reports:
+   * **Verdict**: PASS if no tracker request fired after the mark, REVIEW listing
+   the offending host(s) if one did — a live outbound request after withdrawal is
+   the strongest evidence that processing continued past the point of withdrawal.
+   * **Consent cookie check**: whether the CMP's own consent-state cookie (e.g.
+   `OptanonConsent`, `CookieConsent`, `euconsent-v2`) actually changed value after
+   the mark — a sanity check that the withdrawal registered with the CMP at all.
+   * **Cookies still present**: non-CMP cookies that existed before the mark and
+   remain in the jar afterward. Reported separately and not part of the verdict,
+   since a stale, unused cookie is a weaker signal than a live request — plenty of
+   compliant sites leave inert cookies in place rather than deleting them outright.
+
+Click **Reset** to clear the test and run it again (e.g., on a different page or
+after fixing something).
+
 ## Notes & limitations
 
 * **Keep the tab focused during the scan** (~5–35 s). Navigating away mid-scan
@@ -73,6 +104,34 @@ the `chrome.debugger` API.
 keeps it alive for the ~35 s window in practice.
 
 ## Update log
+
+### v0.3.3 — 2026-07-22
+* Fixed the withdrawal panel disappearing (and its "Test consent withdrawal"
+button doing nothing) after a scan completed. The panel was nested inside the
+same container the scan results get drawn into, so finishing a scan wiped it
+out along with its buttons. It's now a permanent sibling section that survives
+every scan re-render.
+
+### v0.3.2 — 2026-07-22
+* Fixed a dead end in the withdrawal panel: "Mark withdrawal" started disabled
+until a test was running, with no obvious way to recover. It's now a single
+dynamic button — "Mark withdrawal" while a test is monitoring, and "Reset" at
+every other point (before starting, mid-countdown, after results, or on
+error) — so there's always something clickable to move the test forward or
+restart it. A failed mark attempt also falls back to Reset automatically.
+
+### v0.3.1 — 2026-07-22
+* A **"Test consent withdrawal →"** button appears in the scan results, right
+next to the export buttons, so you can jump straight from a completed scan
+into the withdrawal test without hunting for the collapsed panel
+
+### v0.3.0 — 2026-07-22
+* **Consent withdrawal test**: a new panel that monitors the live tab (no
+reload) while you accept consent, browse, then withdraw it through the site's
+own controls; reports whether any tracker request fires after the marked
+withdrawal point, whether the CMP's own consent cookie changed value, and
+which non-CMP cookies remain present afterward
+* Manual "Mark withdrawal" trigger with a 15-second post-mark monitoring window
 
 ### v0.2.0 — 2026-07-15
 * **Tag origin attribution**: every script request and JS-set cookie is labeled
