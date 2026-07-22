@@ -106,21 +106,6 @@ keeps it alive for the ~35 s window in practice.
 ## Update log
 
 ### v0.3.3 — 2026-07-22
-* Fixed the withdrawal panel disappearing (and its "Test consent withdrawal"
-button doing nothing) after a scan completed. The panel was nested inside the
-same container the scan results get drawn into, so finishing a scan wiped it
-out along with its buttons. It's now a permanent sibling section that survives
-every scan re-render.
-
-### v0.3.2 — 2026-07-22
-* Fixed a dead end in the withdrawal panel: "Mark withdrawal" started disabled
-until a test was running, with no obvious way to recover. It's now a single
-dynamic button — "Mark withdrawal" while a test is monitoring, and "Reset" at
-every other point (before starting, mid-countdown, after results, or on
-error) — so there's always something clickable to move the test forward or
-restart it. A failed mark attempt also falls back to Reset automatically.
-
-### v0.3.1 — 2026-07-22
 * A **"Test consent withdrawal →"** button appears in the scan results, right
 next to the export buttons, so you can jump straight from a completed scan
 into the withdrawal test without hunting for the collapsed panel
