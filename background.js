@@ -695,8 +695,35 @@ function cleanup() {
 // withdrawal (the actual compliance-relevant behavior); cookies that persist
 // unexpired are reported separately since a stale inert cookie is a weaker
 // signal than a live outbound request.
+//
+// TrustArc auto-mark: TrustArc broadcasts a window.postMessage event
+// ({source:"preference_manager", message:"submit_preferences"}) the moment a
+// user submits real preferences through its banner/preference UI - this is
+// the same signal TrustArc's own Google Consent Mode integration listens for.
+// We inject a listener for it into the live page at WD_START and poll for it
+// while monitoring, auto-calling markWithdrawal() the instant it fires. This
+// still requires clicking TrustArc's own real reject/withdraw control - it
+// only removes the manual "click Mark withdrawal in the popup" step, so the
+// test still reflects genuine user-facing behavior rather than a simulated
+// API call. "Mark withdrawal" remains available/needed for every other CMP.
 // ---------------------------------------------------------------------------
 const WD_MONITOR_MS = 15000;
+const WD_POLL_MS = 750;
+
+// Injected into the page's MAIN world (executeScript, not a content script -
+// there's no reload to trigger document_start injection here). Idempotent so
+// re-running it mid-test is harmless.
+function installTrustArcAutoMarkListener() {
+  if (window.__consentWithdrawalEvents) return;
+  window.__consentWithdrawalEvents = [];
+  window.addEventListener('message', (event) => {
+    let data;
+    try { data = JSON.parse(event.data); } catch (e) { return; }
+    if (data && data.source === 'preference_manager' && data.message === 'submit_preferences') {
+      try { window.__consentWithdrawalEvents.push(1); } catch (e) {}
+    }
+  }, false);
+}
 
 let activeWD = null;
 
@@ -753,11 +780,42 @@ async function startWithdrawalTest(tabId) {
     siteDomain,
     startedAt: Date.now(),
     markedAt: null,
+    autoDetected: false,
     result: null,
     error: null
   });
 
   installWDListeners();
+
+  // Best-effort: if this fails (e.g. a page that blocks script injection),
+  // auto-mark just won't trigger - manual "Mark withdrawal" still works.
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: installTrustArcAutoMarkListener
+    });
+  } catch (e) { /* non-fatal */ }
+
+  activeWD.pollTimer = setInterval(pollForTrustArcAutoMark, WD_POLL_MS);
+}
+
+function pollForTrustArcAutoMark() {
+  if (!activeWD || activeWD.markedAtMs !== null) return;
+  chrome.scripting.executeScript({
+    target: { tabId: activeWD.tabId },
+    world: 'MAIN',
+    func: () => {
+      const n = (window.__consentWithdrawalEvents || []).length;
+      window.__consentWithdrawalEvents = [];
+      return n;
+    }
+  }).then((results) => {
+    const count = (results && results[0] && results[0].result) || 0;
+    if (count > 0 && activeWD && activeWD.markedAtMs === null) {
+      markWithdrawal(true).catch(() => {});
+    }
+  }).catch(() => { /* tab navigated away / unavailable this tick - try again next poll */ });
 }
 
 function relWD(epochMs) {
@@ -796,15 +854,18 @@ function installWDListeners() {
   chrome.cookies.onChanged.addListener(L.onCookieChanged);
 }
 
-async function markWithdrawal() {
+async function markWithdrawal(auto = false) {
   if (!activeWD) throw new Error('Start a withdrawal test first');
-  if (activeWD.markedAtMs !== null) throw new Error('Withdrawal already marked for this test');
+  clearInterval(activeWD.pollTimer);
+  // Already marked (e.g. auto-detect and a manual click land at nearly the
+  // same instant) - harmless no-op rather than an error.
+  if (activeWD.markedAtMs !== null) return;
 
   activeWD.markedAtMs = relWD(Date.now());
   const snap = await snapshotCookies(activeWD.siteDomain);
   activeWD.cmpSnapshotAtMark = snapshotCmpCookies(snap);
 
-  await setWDState({ status: 'withdrawn', markedAt: Date.now() });
+  await setWDState({ status: 'withdrawn', markedAt: Date.now(), autoDetected: auto });
   activeWD.timeout = setTimeout(() => finalizeWithdrawal().catch(() => {}), WD_MONITOR_MS);
 }
 
@@ -873,6 +934,7 @@ async function finalizeWithdrawal() {
 function cleanupWD() {
   if (!activeWD) return;
   clearTimeout(activeWD.timeout);
+  clearInterval(activeWD.pollTimer);
   const L = activeWD.listeners || {};
   try { if (L.onRequest) chrome.webRequest.onBeforeRequest.removeListener(L.onRequest); } catch (e) {}
   try { if (L.onCookieChanged) chrome.cookies.onChanged.removeListener(L.onCookieChanged); } catch (e) {}

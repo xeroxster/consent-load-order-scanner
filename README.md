@@ -62,8 +62,16 @@ network request and cookie change from that moment.
 browse around so trackers/cookies get set.
 3. Use the site's **own** controls to withdraw consent — reject all, disable
 categories, "Do Not Sell," reopen preferences and opt out, whatever it offers.
-4. **Mark withdrawal** the instant after you've done that. The extension then
-watches for 15 more seconds and reports:
+4. **On TrustArc sites, this step is automatic**: TrustArc broadcasts a
+`window.postMessage` event (`source: "preference_manager", message:
+"submit_preferences"`) the instant a user submits real preferences — the same
+signal TrustArc's own Google Consent Mode integration listens for. The extension
+detects it and marks withdrawal itself; you still click TrustArc's real
+reject/withdraw control, so the test still reflects genuine user-facing behavior
+rather than a simulated API call. On every other CMP, click **Mark withdrawal**
+immediately after withdrawing consent.
+
+Either way, the extension then watches for 15 more seconds and reports:
    * **Verdict**: PASS if no tracker request fired after the mark, REVIEW listing
    the offending host(s) if one did — a live outbound request after withdrawal is
    the strongest evidence that processing continued past the point of withdrawal.
@@ -77,6 +85,15 @@ watches for 15 more seconds and reports:
 
 Click **Reset** to clear the test and run it again (e.g., on a different page or
 after fixing something).
+
+**Why this doesn't call TrustArc's API to simulate a rejection instead of watching
+for the real event**: TrustArc has a `setConsentLevels` API that can, in principle,
+set consent programmatically without touching the UI. It wasn't used here because
+its category IDs are configurable per TrustArc customer (not a universal 1/2/3),
+it may require deployment options not present on every site, and — most
+importantly — there's no guarantee it fires the same signal real trackers listen
+for, which could produce a false PASS. Detecting the real `postMessage` event
+that fires on a genuine UI interaction avoids all three problems.
 
 ## Notes & limitations
 
@@ -105,7 +122,37 @@ keeps it alive for the ~35 s window in practice.
 
 ## Update log
 
+### v0.4.0 — 2026-07-22
+* **TrustArc auto-detect for the withdrawal test**: the extension now listens
+for TrustArc's own `window.postMessage` signal (fired the instant a user
+submits real preferences through the banner) and marks withdrawal
+automatically the moment it fires. You still click TrustArc's real
+reject/withdraw control — this only removes the need to separately click
+"Mark withdrawal" in the popup. Every other CMP still uses the manual flow.
+Results now show whether withdrawal was detected automatically or marked by
+hand, for the audit trail.
+* Considered and deliberately did not implement calling TrustArc's
+`setConsentLevels` API to simulate a rejection without any UI interaction —
+its category IDs aren't standardized across TrustArc customers and there's no
+guarantee it triggers the same signal real trackers listen for, which risks a
+false PASS. See the withdrawal-test section below for the full reasoning.
+
 ### v0.3.3 — 2026-07-22
+* Fixed the withdrawal panel disappearing (and its "Test consent withdrawal"
+button doing nothing) after a scan completed. The panel was nested inside the
+same container the scan results get drawn into, so finishing a scan wiped it
+out along with its buttons. It's now a permanent sibling section that survives
+every scan re-render.
+
+### v0.3.2 — 2026-07-22
+* Fixed a dead end in the withdrawal panel: "Mark withdrawal" started disabled
+until a test was running, with no obvious way to recover. It's now a single
+dynamic button — "Mark withdrawal" while a test is monitoring, and "Reset" at
+every other point (before starting, mid-countdown, after results, or on
+error) — so there's always something clickable to move the test forward or
+restart it. A failed mark attempt also falls back to Reset automatically.
+
+### v0.3.1 — 2026-07-22
 * A **"Test consent withdrawal →"** button appears in the scan results, right
 next to the export buttons, so you can jump straight from a completed scan
 into the withdrawal test without hunting for the collapsed panel

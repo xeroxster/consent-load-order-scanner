@@ -5,7 +5,7 @@ const content = document.getElementById('content');
 const scanBtn = document.getElementById('scanBtn');
 
 // Version (from manifest.json) and last-updated date shown in the header.
-const UPDATED = '2026-07-22'; // v0.3.3
+const UPDATED = '2026-07-22'; // v0.4.0
 try {
   document.getElementById('meta').textContent =
     `v${chrome.runtime.getManifest().version} · updated ${UPDATED}`;
@@ -272,14 +272,18 @@ function renderWD(wd) {
 
   if (wd.status === 'monitoring') {
     setWDButtons('monitoring');
-    wdStatusLine.innerHTML = `<span class="spinner">&#9696;</span> Monitoring ${esc(wd.url || '')} — grant consent, browse, then withdraw it on the page, then click <b>Mark withdrawal</b>.`;
+    wdStatusLine.innerHTML = `<span class="spinner">&#9696;</span> Monitoring ${esc(wd.url || '')} — grant consent, browse, then withdraw it on the page. If this is a
+      TrustArc site, submitting your preferences is detected automatically; otherwise click <b>Mark withdrawal</b>.`;
     wdResults.innerHTML = '';
     return;
   }
 
   if (wd.status === 'withdrawn') {
     setWDButtons('withdrawn');
-    wdStatusLine.innerHTML = `<span class="spinner">&#9696;</span> Withdrawal marked — checking for ~15s to see if any tracker still fires… (click Reset to abort early)`;
+    const how = wd.autoDetected
+      ? 'Withdrawal <b>auto-detected</b> from TrustArc’s own preferences-submitted signal'
+      : 'Withdrawal marked';
+    wdStatusLine.innerHTML = `<span class="spinner">&#9696;</span> ${how} — checking for ~15s to see if any tracker still fires… (click Reset to abort early)`;
     wdResults.innerHTML = '';
     return;
   }
@@ -313,6 +317,7 @@ function renderWD(wd) {
     wdResults.innerHTML = `
       <div class="verdict ${r.verdictClass}" style="margin-top:8px;">${esc(r.verdict)}</div>
       <div class="kv">
+        <div>Withdrawal detected via</div><div>${wd.autoDetected ? 'TrustArc auto-detect (postMessage signal)' : 'Manual "Mark withdrawal" click'}</div>
         <div>Consent cookie check</div><div>${cmpLine}</div>
         <div>Cookies still present*</div><div>${r.stillPresentCookies.length ? esc(r.stillPresentCookies.join(', ')) : 'none'}</div>
       </div>
